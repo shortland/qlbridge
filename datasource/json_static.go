@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/ioutil"
 	"strings"
@@ -13,24 +14,18 @@ import (
 )
 
 var (
-	DUMMY_COLS = []string{"user_id", "email", "interests", "reg_date", "item_count"}
-)
-
-var (
 	_ schema.Source      = (*JSONStaticSource)(nil)
 	_ schema.Conn        = (*JSONStaticSource)(nil)
 	_ schema.ConnScanner = (*JSONStaticSource)(nil)
 )
 
 type JSONStaticSource struct {
-	table   string
-	rawJSON string
-	tbl     *schema.Table
-	rowct   uint64
-	columns []string
-
-	exit <-chan bool
-
+	table    string
+	rawJSON  string
+	tbl      *schema.Table
+	rowct    uint64
+	columns  []string
+	exit     <-chan bool
 	r        *bufio.Reader
 	complete bool
 	err      error
@@ -41,7 +36,7 @@ func NewJSONStaticSource(tableName string, tableData string, exit <-chan bool) (
 	m := JSONStaticSource{
 		table:   tableName,
 		rawJSON: tableData,
-		exit:    exit, // for iterator
+		exit:    exit,
 	}
 
 	if m.lh == nil {
@@ -70,7 +65,11 @@ func (m *JSONStaticSource) loadTable() error {
 	tbl := schema.NewTable(strings.ToLower(m.table))
 
 	// TODO temporary constant for getting json table columns
-	m.columns = DUMMY_COLS
+	columns, err := m.parseColumns(m.rawJSON)
+	if err != nil {
+		return err
+	}
+	m.columns = columns
 
 	for i := range m.columns {
 		m.columns[i] = strings.ToLower(m.columns[i])
@@ -82,8 +81,7 @@ func (m *JSONStaticSource) loadTable() error {
 }
 
 func (m *JSONStaticSource) Open(tableName string) (schema.Conn, error) {
-	exit := make(<-chan bool, 1)
-	return NewJSONStaticSource(tableName, m.rawJSON, exit)
+	return NewJSONStaticSource(tableName, m.rawJSON, make(<-chan bool, 1))
 }
 
 func (m *JSONStaticSource) Close() error {
@@ -119,6 +117,25 @@ func (m *JSONStaticSource) Next() schema.Message {
 			return msg
 		}
 	}
+}
+
+// parseColumns expects the first line of JSON to contain all the keys/columns
+// Any new keys/columns declared in latter lines of JSON will be ignored
+func (m *JSONStaticSource) parseColumns(rawData string) ([]string, error) {
+	line := strings.Split(rawData, "\n")
+	if len(line) == 0 {
+		return nil, errors.New("Not enough data to parse columns")
+	}
+
+	jm := make(map[string]interface{})
+	json.Unmarshal([]byte(line[0]), &jm)
+
+	keys := make([]string, len(jm))
+	for k := range jm {
+		keys = append(keys, k)
+	}
+
+	return keys, nil
 }
 
 func (m *JSONStaticSource) jsonDefaultLineHandler(line []byte) (schema.Message, error) {
